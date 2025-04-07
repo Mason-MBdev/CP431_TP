@@ -1,111 +1,122 @@
-# Parallel Programming, Multiplication Table Analysis
+# Multiplication Table Analysis
 
-A parallel implementation for computing the number of unique elements in N×N multiplication tables using the Message Passing Interface.
+A parallel implementation for computing the number of unique elements in N×N multiplication tables using the Message Passing Interface. Began as a group assignment but I've continued it for practice and optimization.
+
+## Results
+
+When run on a Ryzen 9 5900X (12 cores, 24 threads) with 24 parallel processes, the program produced these results:
+
+| N     | Total Products | Unique Elements (M(N)) | % Unique | Runtime (seconds) |
+|-------|----------------|------------------------|----------|-------------------|
+| 10    | 100            | 42                     | 42.00%   | 0.002264          |
+| 50    | 2,500          | 800                    | 32.00%   | 0.002393          |
+| 100   | 10,000         | 2,906                  | 29.06%   | 0.002782          |
+| 500   | 250,000        | 64,673                 | 25.87%   | 0.019317          |
+| 1000  | 1,000,000      | 248,083                | 24.81%   | 0.072280          |
+| 2000  | 4,000,000      | 959,759                | 23.99%   | 0.282714          |
+| 5000  | 25,000,000     | 5,770,205              | 23.08%   | 1.774261          |
+| 10000 | 100,000,000    | 22,504,348             | 22.50%   | 7.358289          |
+| 20000 | 400,000,000    | 87,938,320             | 21.98%   | 30.703627         |
+| 30000 | 900,000,000    | 195,378,691            | 21.71%   | 69.146723         |
+| 40000 | 1,600,000,000  | 344,462,009            | 21.53%   | 127.397301        |
+| 50000 | 2,500,000,000  | 534,772,334            | 21.39%   | 379.415311        |
+
+Key finding: Only about 21% of numbers in large multiplication tables are unique. I'll need to test for larger values of N to see if there is a pattern limiting around 21%.
 
 ## Problem Statement
 
-An N×N multiplication table is defined as a matrix where each element A_ij = i × j, for i, j = 1, ..., N.
-
-Key observations:
-- The multiplication table is symmetric
-- The main diagonal contains squares: 1², 2², ..., N²
-- Some elements above the main diagonal are repeated
-
-We define M(N) as the count of unique elements in the N×N multiplication table.
-
-For example:
-- M(2) = 3 (unique elements: 1, 2, 4)
-- M(3) = 6 (unique elements: 1, 2, 3, 4, 6, 9)
-- M(4) = 9 (unique elements: 1, 2, 3, 4, 6, 8, 9, 12, 16)
-- M(10) = 42
-
-## Implementation
-
-The algorithm follows these four steps:
-1. Computation of only the upper triangular part of the matrix
-2. Even distribution of workload across MPI processes
-3. Efficient gathering and merging of results
-4. Sorting and unique element counting in the main process
-
-### Key Components of the Code
-
-#### 1. Work Distribution
-
-The algorithm distributes the computation evenly across all processes by calculating the total number of pairs in the upper triangular matrix and then dividing the work:
-
-```c
-// Calculate total number of products to distribute evenly
-int total_pairs = (N * (N + 1)) / 2;  // Only compute upper triangular matrix (i <= j)
-int pairs_per_proc = total_pairs / world_size;
-int remainder = total_pairs % world_size;
-
-// Determine start and end indices for this process
-int start_idx = world_rank * pairs_per_proc + (world_rank < remainder ? world_rank : remainder);
-int end_idx = start_idx + pairs_per_proc + (world_rank < remainder ? 1 : 0) - 1;
+A multiplication table shows products of numbers. For example, a 3×3 table looks like:
+```
+    1  2  3
+  ┌─────────
+1 │ 1  2  3
+2 │ 2  4  6
+3 │ 3  6  9
 ```
 
-#### 2. Computing Products
+This table has 9 spots but only 6 different values (1, 2, 3, 4, 6, 9).
 
-Each process computes only its assigned portion of the multiplication table:
+The goal is to find M(N) - how many different unique values exist in an N×N table.
+
+## How the Program Works
+
+The code uses several efficiency techniques:
+
+1. Only computes half the table since it's symmetric
+2. Splits work across multiple CPU cores
+3. Uses a hash table to track unique numbers
+4. Includes a 64-bit version for huge tables (N > 40,000)
+
+### The Hash Table
 
 ```c
-// Compute all products for assigned portion
-int global_idx = 0;
-for (int i = 1; i <= N; i++) {
-    for (int j = i; j <= N; j++) {  // Only compute upper triangular matrix (i <= j)
-        if (global_idx >= start_idx && global_idx <= end_idx) {
-            products[count++] = i * j;
+typedef struct {
+    int* buckets;
+    int size;
+    int count;
+} HashSet;
+
+// Add a value to the hash set
+bool hashset_add(HashSet* set, int value) {
+    unsigned int pos = hash(value, set->size);
+    while (set->buckets[pos] != -1) {
+        if (set->buckets[pos] == value) {
+            return false;  // Already exists
         }
-        global_idx++;
+        pos = (pos + 1) % set->size;  // Linear probing
+    }
+    
+    // Insert value
+    set->buckets[pos] = value;
+    set->count++;
+    return true;
+}
+```
+
+### Computing the Products
+
+```c
+// Compute products and track unique ones
+while (global_idx <= end_idx && i <= N) {
+    int product = (int)(i * j);
+    hashset_add(&unique_products, product);
+    
+    global_idx++;
+    j++;
+    if (j > N) {
+        i++;
+        j = i;
     }
 }
 ```
 
-#### 3. Gathering Results
+## How to Run It
 
-The main process gathers products from all processes and merges them:
+### Windows (with MS-MPI)
 
-```c
-// Gather all products from each process
-MPI_Gatherv(products, count, MPI_INT, 
-           all_products, all_counts, displacements, 
-           MPI_INT, 0, MPI_COMM_WORLD);
+1. Install MS-MPI from [Microsoft's MS-MPI page](https://www.microsoft.com/en-us/download/details.aspx?id=57467)
 
-// Sort all products
-qsort(all_products, total_size, sizeof(int), compare);
-```
+2. Compile the program:
+   ```
+   gcc multiplication.c -o multiplication.exe -I"C:\Program Files (x86)\Microsoft SDKs\MPI\Include" -L"C:\Program Files (x86)\Microsoft SDKs\MPI\Lib\x64" -lmsmpi
+   ```
 
-#### 4. Counting Unique Elements
+3. Run with a specific N value:
+   ```
+   "C:\Program Files\Microsoft MPI\Bin\mpiexec.exe" -n 24 multiplication.exe 10000
+   ```
+   
+   For very large tables, use the 64-bit version:
+   ```
+   "C:\Program Files\Microsoft MPI\Bin\mpiexec.exe" -n 24 multiplication_opt_64bit.exe 50000
+   ```
 
-After sorting, counting unique elements is straightforward:
+## Key Findings
 
-```c
-// Count unique elements
-int unique_count = 0;
-int prev = -1;  // Use -1 since all products are positive
+1. Only about 21% of the products in big multiplication tables are unique.
 
-for (int i = 0; i < total_size; i++) {
-    if (i == 0 || all_products[i] != prev) {
-        unique_count++;
-    }
-    prev = all_products[i];
-}
-```
+2. Using multiple CPU cores makes the program much faster for big tables.
 
-## Efficiency Analysis
+3. The 64-bit version can handle extremely large tables (N=50,000).
 
-This implementation is efficient for several reasons:
-
-1. **Reduced Computation**: By leveraging the symmetry of the multiplication table, we only compute the upper triangular portion, reducing the work by approximately half.
-
-2. **Load Balancing**: The algorithm distributes work evenly among processes, ensuring each process handles a similar amount of computation.
-
-3. **Memory Efficiency**: Each process only stores its portion of the products, allowing for handling larger values of N.
-
-4. **Minimal Communication**: Processes compute independently and only communicate when gathering results at the end, minimizing communication overhead.
-
-5. **Scalability**: The approach scales well with additional processes, making it suitable for computing M(N) for large values of N (up to 10^5). I reccomend running this on sharcnet (or a similar system) for larger numbers.
-
-## Conclusion
-
-The parallel implementation we have developed, **significantly** outperforms sequential approaches for large values of N. And meets all of the load balancing and scalability requirements of an efficient algorithm.
+4. The percentage of unique values approaches 21% as tables get bigger, suggesting an interesting mathematical pattern.

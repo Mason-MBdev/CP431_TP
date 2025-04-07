@@ -1,0 +1,6 @@
+Computing M(50000) with 24 processes...
+All processes have computed their unique products
+M(50000) = 534772334
+Total products in table: 2500000000
+Percentage of unique products: 21.39%
+Time elapsed: 379.415311 seconds
